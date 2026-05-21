@@ -41,8 +41,12 @@ class NewsConfig(BaseSettings):
 
 
 class AIConfig(BaseSettings):
-    """AI/LLM configuration."""
+    """AI/LLM configuration (OpenAI + Anthropic)."""
     openai_api_key: str = Field(default="", alias="OPENAI_API_KEY")
+    openai_model: str = Field(default="gpt-4o-mini", alias="OPENAI_MODEL")
+    anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
+    anthropic_model: str = Field(default="claude-sonnet-4-20250514", alias="ANTHROPIC_MODEL")
+    ai_provider: str = Field(default="both", alias="AI_PROVIDER")  # "openai", "anthropic", "both"
 
 
 class RiskConfig(BaseSettings):

@@ -38,6 +38,7 @@ from polybotking.engines.wallet_intelligence import wallet_intelligence, SmartMo
 from polybotking.engines.sentiment_ai import sentiment_ai, SentimentSignal
 from polybotking.engines.volatility_timing import volatility_timer, TimingSignal
 from polybotking.engines.risk_engine import risk_engine, PositionSize
+from polybotking.engines.ai_reasoning import ai_reasoning, DualAISignal
 
 logger = get_logger("orchestrator")
 
@@ -64,6 +65,7 @@ class TradingDecision:
     wallet_signal: Optional[SmartMoneySignal] = None
     sentiment_signal: Optional[SentimentSignal] = None
     timing_signal: Optional[TimingSignal] = None
+    ai_signal: Optional[DualAISignal] = None
 
     # Decision metadata
     reasoning: list[str] = field(default_factory=list)
@@ -113,6 +115,7 @@ class Orchestrator:
             sentiment_ai.start(),
             volatility_timer.start(),
             risk_engine.start(),
+            ai_reasoning.start(),
         )
 
         self._running = True
@@ -130,6 +133,7 @@ class Orchestrator:
             sentiment_ai.stop(),
             volatility_timer.stop(),
             risk_engine.stop(),
+            ai_reasoning.stop(),
         )
 
         logger.info(
@@ -184,10 +188,27 @@ class Orchestrator:
             sentiment_signals_task = sentiment_ai.analyze_markets(market_data)
             timing_signals_task = volatility_timer.analyze_markets(market_data)
 
-            wallet_signals, sentiment_signals, timing_signals = await asyncio.gather(
+            # Prepare market data for AI reasoning
+            ai_market_data = [
+                {
+                    "market_id": opp.market_id,
+                    "question": opp.question,
+                    "yes_price": opp.market_price,
+                    "no_price": 1 - opp.market_price,
+                    "volume": 0,
+                    "end_date": "",
+                    "sentiment_context": "",
+                    "wallet_context": "",
+                }
+                for opp in market_opportunities[:10]  # AI only for top 10 (rate limit)
+            ]
+            ai_signals_task = ai_reasoning.analyze_markets(ai_market_data)
+
+            wallet_signals, sentiment_signals, timing_signals, ai_signals = await asyncio.gather(
                 wallet_signals_task,
                 sentiment_signals_task,
                 timing_signals_task,
+                ai_signals_task,
                 return_exceptions=True,
             )
 
@@ -201,11 +222,15 @@ class Orchestrator:
             if isinstance(timing_signals, Exception):
                 logger.error("timing_engine_error", error=str(timing_signals))
                 timing_signals = []
+            if isinstance(ai_signals, Exception):
+                logger.error("ai_engine_error", error=str(ai_signals))
+                ai_signals = []
 
             # Index signals by market_id
             wallet_by_market = {s.market_id: s for s in wallet_signals}
             sentiment_by_market = {s.market_id: s for s in sentiment_signals}
             timing_by_market = {s.market_id: s for s in timing_signals}
+            ai_by_market = {s.market_id: s for s in ai_signals}
 
             # ===== STAGE 4: AI Inference - Signal Combination =====
             logger.info("pipeline_stage_4", stage="signal_combination")
@@ -216,6 +241,7 @@ class Orchestrator:
                     wallet_signal=wallet_by_market.get(opp.market_id),
                     sentiment_signal=sentiment_by_market.get(opp.market_id),
                     timing_signal=timing_by_market.get(opp.market_id),
+                    ai_signal=ai_by_market.get(opp.market_id),
                 )
 
                 if decision:
@@ -269,6 +295,7 @@ class Orchestrator:
         wallet_signal: Optional[SmartMoneySignal],
         sentiment_signal: Optional[SentimentSignal],
         timing_signal: Optional[TimingSignal],
+        ai_signal: Optional[DualAISignal] = None,
     ) -> Optional[TradingDecision]:
         """
         Combine all engine signals into a unified trading decision.
@@ -313,6 +340,19 @@ class Orchestrator:
                 # Timing says exit → reduce confidence
                 confidence_scores.append(-0.2)
                 reasoning.append(f"Timing: EXIT warning - {timing_signal.reasoning}")
+
+        # --- Dual AI Reasoning Signal ---
+        if ai_signal and ai_signal.consensus_confidence > 0.3:
+            ai_weight = 0.20  # AI gets significant weight when available
+            direction_votes[ai_signal.consensus_direction] += ai_weight * ai_signal.consensus_confidence
+            confidence_scores.append(ai_signal.consensus_confidence * ai_weight)
+            # Strong agreement boosts confidence significantly
+            if ai_signal.agreement_level == "strong":
+                confidence_scores.append(0.15)  # Bonus for strong AI consensus
+            reasoning.append(
+                f"AI({ai_signal.agreement_level}): {ai_signal.consensus_direction} "
+                f"p={ai_signal.consensus_probability:.3f} conf={ai_signal.consensus_confidence:.2f}"
+            )
 
         # --- Determine Final Direction ---
         final_direction = max(direction_votes, key=direction_votes.get)
