@@ -64,6 +64,34 @@ class PolyBotKing:
                    max_positions=settings.trading.max_concurrent_positions,
                    target_winrate=f"{settings.trading.target_winrate_min:.0%}-{settings.trading.target_winrate_max:.0%}")
 
+        # Check geo-block status before starting
+        logger.info("checking_geo_status")
+        import httpx
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get("https://clob.polymarket.com/geo")
+                geo_data = resp.json()
+                if geo_data.get("blocked"):
+                    logger.error(
+                        "GEO_BLOCKED",
+                        ip=geo_data.get("ip"),
+                        country=geo_data.get("country"),
+                        msg="VPS IP is blocked by Polymarket! Change VPS location."
+                    )
+                    print(f"\n❌ BLOCKED! IP {geo_data.get('ip')} country={geo_data.get('country')}")
+                    print("   Polymarket memblokir lokasi ini. Ganti VPS ke negara yang diizinkan.")
+                    return
+                else:
+                    logger.info(
+                        "geo_check_passed",
+                        ip=geo_data.get("ip"),
+                        country=geo_data.get("country"),
+                        blocked=False,
+                    )
+                    print(f"   ✅ GEO OK: IP={geo_data.get('ip')} Country={geo_data.get('country')} Blocked=False")
+        except Exception as e:
+            logger.warning("geo_check_failed", error=str(e), msg="Continuing anyway...")
+
         # Initialize database
         logger.info("initializing_database")
         await init_db()
