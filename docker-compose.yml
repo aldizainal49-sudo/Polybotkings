@@ -1,0 +1,47 @@
+version: "3.9"
+
+services:
+  polybotking:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: polybotking
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    networks:
+      - botnet
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: "2.0"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8080/health')"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: polybotking-dashboard
+    command: ["python", "-m", "polybotking.dashboard"]
+    restart: always
+    env_file:
+      - .env
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    networks:
+      - botnet
+
+networks:
+  botnet:
+    driver: bridge
