@@ -9,12 +9,14 @@ from pydantic import Field
 
 
 class PolymarketConfig(BaseSettings):
-    """Polymarket CLOB API configuration."""
+    """Polymarket CLOB V2 API configuration."""
     api_key: str = Field(default="", alias="POLY_API_KEY")
     api_secret: str = Field(default="", alias="POLY_API_SECRET")
     api_passphrase: str = Field(default="", alias="POLY_API_PASSPHRASE")
     private_key: str = Field(default="", alias="POLY_PRIVATE_KEY")
     chain_id: int = Field(default=137, alias="POLY_CHAIN_ID")
+    pusd_contract: str = Field(default="", alias="POLY_PUSD_CONTRACT")
+    wallet_type: str = Field(default="deposit", alias="POLY_WALLET_TYPE")  # "deposit" or "proxy"
 
 
 class DatabaseConfig(BaseSettings):

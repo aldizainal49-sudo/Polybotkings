@@ -82,10 +82,10 @@ class ExecutionEngine:
             headers={"Accept": "application/json"},
         )
 
-        # Initialize py-clob-client
+        # Initialize py-clob-client-v2 (CLOB V2 with pUSD collateral)
         try:
-            from py_clob_client.client import ClobClient
-            from py_clob_client.clob_types import ApiCreds
+            from py_clob_client_v2.client import ClobClient
+            from py_clob_client_v2.clob_types import ApiCreds
 
             if settings.polymarket.api_key and settings.polymarket.private_key:
                 creds = ApiCreds(
@@ -98,13 +98,15 @@ class ExecutionEngine:
                     chain_id=settings.polymarket.chain_id,
                     key=settings.polymarket.private_key,
                     creds=creds,
+                    # V2: pUSD collateral, deposit wallets
+                    funder=settings.polymarket.wallet_type,
                 )
-                logger.info("clob_client_initialized")
+                logger.info("clob_client_v2_initialized", collateral="pUSD", wallet_type=settings.polymarket.wallet_type)
             else:
                 logger.warning("clob_client_no_credentials", msg="Running in paper-trade mode")
 
         except ImportError:
-            logger.warning("py_clob_client_not_installed", msg="Running in simulation mode")
+            logger.warning("py_clob_client_v2_not_installed", msg="Running in simulation mode")
 
         # Load active positions from DB
         await self._load_active_positions()
@@ -209,8 +211,8 @@ class ExecutionEngine:
             return await self._simulate_order(market_id, side, price, size)
 
         try:
-            from py_clob_client.clob_types import OrderArgs, OrderType
-            from py_clob_client.order_builder.constants import BUY, SELL
+            from py_clob_client_v2.clob_types import OrderArgs, OrderType
+            from py_clob_client_v2.order_builder.constants import BUY, SELL
 
             # Determine token_id (YES token for BUY YES, NO token for BUY NO)
             token_id = await self._get_token_id(market_id, side)
