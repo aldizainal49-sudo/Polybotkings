@@ -28,6 +28,8 @@ from datetime import datetime
 from typing import Optional
 from dataclasses import dataclass, field
 
+import numpy as np
+
 from polybotking.config import settings
 from polybotking.logger import get_logger
 from polybotking.models import Signal, SignalType, async_session
