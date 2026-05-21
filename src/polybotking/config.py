@@ -14,6 +14,7 @@ class PolymarketConfig(BaseSettings):
     api_secret: str = Field(default="", alias="POLY_API_SECRET")
     api_passphrase: str = Field(default="", alias="POLY_API_PASSPHRASE")
     private_key: str = Field(default="", alias="POLY_PRIVATE_KEY")
+    wallet_address: str = Field(default="", alias="POLY_WALLET_ADDRESS")  # Alamat profil deposit wallet
     chain_id: int = Field(default=137, alias="POLY_CHAIN_ID")
     pusd_contract: str = Field(default="", alias="POLY_PUSD_CONTRACT")
     wallet_type: str = Field(default="deposit", alias="POLY_WALLET_TYPE")  # "deposit" or "proxy"

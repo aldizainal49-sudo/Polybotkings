@@ -98,10 +98,15 @@ class ExecutionEngine:
                     chain_id=settings.polymarket.chain_id,
                     key=settings.polymarket.private_key,
                     creds=creds,
-                    # V2: pUSD collateral, deposit wallets
-                    funder=settings.polymarket.wallet_type,
+                    # V2: pUSD collateral, deposit wallet address dari profil
+                    funder=settings.polymarket.wallet_address,
                 )
-                logger.info("clob_client_v2_initialized", collateral="pUSD", wallet_type=settings.polymarket.wallet_type)
+                logger.info(
+                    "clob_client_v2_initialized",
+                    collateral="pUSD",
+                    wallet_type=settings.polymarket.wallet_type,
+                    funder=settings.polymarket.wallet_address[:10] + "..." if settings.polymarket.wallet_address else "none",
+                )
             else:
                 logger.warning("clob_client_no_credentials", msg="Running in paper-trade mode")
 
