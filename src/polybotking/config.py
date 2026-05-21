@@ -65,8 +65,15 @@ class TradingConfig(BaseSettings):
     max_concurrent_positions: int = Field(default=10, alias="MAX_CONCURRENT_POSITIONS")
     market_timeframe_min_hours: int = Field(default=1, alias="MARKET_TIMEFRAME_MIN_HOURS")
     market_timeframe_max_days: int = Field(default=7, alias="MARKET_TIMEFRAME_MAX_DAYS")
+    enable_15min_markets: bool = Field(default=True, alias="ENABLE_15MIN_MARKETS")
     target_winrate_min: float = Field(default=0.70, alias="TARGET_WINRATE_MIN")
     target_winrate_max: float = Field(default=0.85, alias="TARGET_WINRATE_MAX")
+    # Exit optimization
+    take_profit_pct: float = Field(default=0.25, alias="TAKE_PROFIT_PCT")
+    stop_loss_pct: float = Field(default=0.15, alias="STOP_LOSS_PCT")
+    trailing_stop_pct: float = Field(default=0.10, alias="TRAILING_STOP_PCT")
+    # WebSocket
+    enable_websocket: bool = Field(default=True, alias="ENABLE_WEBSOCKET")
 
 
 class AlertsConfig(BaseSettings):

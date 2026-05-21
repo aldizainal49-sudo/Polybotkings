@@ -21,6 +21,9 @@ from polybotking.logger import setup_logging, get_logger
 from polybotking.models import init_db
 from polybotking.orchestrator import orchestrator
 from polybotking.engines.execution import execution_engine
+from polybotking.engines.websocket_feed import websocket_feed
+from polybotking.engines.exit_optimizer import exit_optimizer
+from polybotking.engines.telegram_alerts import telegram_alerts
 
 logger = get_logger("main")
 
@@ -99,12 +102,28 @@ class PolyBotKing:
         # Start execution engine
         await execution_engine.start()
 
+        # Start v2 engines
+        await exit_optimizer.start()
+        await telegram_alerts.start()
+
         # Start orchestrator with execution callback
         await orchestrator.start(execution_callback=execution_engine.execute_trade)
 
         # Start background tasks
         self._health_task = asyncio.create_task(self._health_check_loop())
         self._monitor_task = asyncio.create_task(self._position_monitor_loop())
+
+        # Start WebSocket feed (real-time price updates)
+        if settings.trading.enable_websocket:
+            await websocket_feed.start()
+            self._ws_task = asyncio.create_task(websocket_feed.run_forever())
+
+        # Send Telegram notification
+        await telegram_alerts.bot_started(
+            bankroll=settings.risk.initial_bankroll,
+            ip=geo_data.get("ip", "unknown") if 'geo_data' in dir() else "unknown",
+            country=geo_data.get("country", "??") if 'geo_data' in dir() else "??",
+        )
 
         logger.info("polybotking_running", msg="All systems operational. Entering main loop.")
 
@@ -158,7 +177,7 @@ class PolyBotKing:
                 logger.error("health_check_error", error=str(e))
 
     async def _position_monitor_loop(self):
-        """Monitor and update active positions."""
+        """Monitor and update active positions + exit optimization."""
         while True:
             try:
                 await asyncio.sleep(60)  # Every minute
@@ -168,6 +187,25 @@ class PolyBotKing:
 
                 # Check for resolved markets
                 await execution_engine.check_resolved_markets()
+
+                # v2: Exit optimization (take profit / trailing stop)
+                if execution_engine.active_positions:
+                    exit_decisions = exit_optimizer.analyze_all_positions(
+                        execution_engine.active_positions
+                    )
+                    for exit_decision in exit_decisions:
+                        if exit_decision.urgency == "immediate":
+                            result = await execution_engine.close_position(
+                                exit_decision.market_id, reason=exit_decision.action
+                            )
+                            if result and result.success:
+                                await telegram_alerts.trade_closed(
+                                    market_id=exit_decision.market_id,
+                                    pnl=exit_decision.unrealized_pnl_pct * 100,
+                                    bankroll=0, win_rate=0,
+                                    reason=exit_decision.action,
+                                )
+                                exit_optimizer.clear_peak(exit_decision.market_id)
 
             except asyncio.CancelledError:
                 break

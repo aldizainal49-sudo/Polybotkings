@@ -1,6 +1,6 @@
 [project]
 name = "polybotking"
-version = "1.0.0"
+version = "2.0.0"
 description = "PolyBotKing - Autonomous Polymarket Trading Bot with Multi-Agent Orchestration"
 readme = "README.md"
 requires-python = ">=3.11"
