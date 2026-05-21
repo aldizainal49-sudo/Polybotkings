@@ -28,11 +28,11 @@ class DatabaseConfig(BaseSettings):
     )
 
 
-class TwitterConfig(BaseSettings):
-    """Twitter/X API configuration."""
-    bearer_token: str = Field(default="", alias="TWITTER_BEARER_TOKEN")
-    api_key: str = Field(default="", alias="TWITTER_API_KEY")
-    api_secret: str = Field(default="", alias="TWITTER_API_SECRET")
+class RedditConfig(BaseSettings):
+    """Reddit API configuration (GRATIS - 100 req/menit)."""
+    client_id: str = Field(default="", alias="REDDIT_CLIENT_ID")
+    client_secret: str = Field(default="", alias="REDDIT_CLIENT_SECRET")
+    user_agent: str = Field(default="polybotking:v1.0", alias="REDDIT_USER_AGENT")
 
 
 class NewsConfig(BaseSettings):
@@ -79,7 +79,7 @@ class Settings:
     def __init__(self):
         self.polymarket = PolymarketConfig()
         self.database = DatabaseConfig()
-        self.twitter = TwitterConfig()
+        self.reddit = RedditConfig()
         self.news = NewsConfig()
         self.ai = AIConfig()
         self.risk = RiskConfig()

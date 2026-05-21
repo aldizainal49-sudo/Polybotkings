@@ -1,13 +1,14 @@
 """
 Sentiment AI Engine
 ===================
-Scans X (Twitter) + news BEFORE market adjusts price.
+Scans Reddit + Google News RSS BEFORE market adjusts price.
 NLP-powered sentiment analysis with real-time signal generation.
 
 Core capabilities:
-- Monitor X/Twitter for market-relevant keywords/events
-- Aggregate news from multiple RSS/API sources
-- Run transformer-based sentiment classification
+- Monitor Reddit crypto/prediction market subreddits (GRATIS)
+- Scrape Google News RSS for market-relevant keywords (GRATIS)
+- Aggregate news from multiple RSS/API sources (GRATIS)
+- Run NLP-based sentiment classification
 - Detect sentiment shifts before they reflect in prices
 - Generate trading signals from sentiment divergence
 """
@@ -17,6 +18,7 @@ import re
 from datetime import datetime, timedelta
 from typing import Optional
 from dataclasses import dataclass, field
+from urllib.parse import quote_plus
 
 import httpx
 import feedparser
@@ -29,7 +31,27 @@ from polybotking.models import Signal, SignalType, async_session
 
 logger = get_logger("sentiment_ai")
 
-# News RSS sources for crypto/prediction markets
+# ============================================================
+# FREE DATA SOURCES
+# ============================================================
+
+# Reddit subreddits to monitor (crypto + prediction markets)
+REDDIT_SUBREDDITS = [
+    "cryptocurrency",
+    "polymarket",
+    "bitcoin",
+    "ethereum",
+    "CryptoMarkets",
+    "defi",
+    "altcoin",
+    "predictit",
+    "wallstreetbets",
+]
+
+# Google News RSS (GRATIS - tanpa API key)
+GOOGLE_NEWS_RSS = "https://news.google.com/rss/search?q={query}&hl=en&gl=US&ceid=US:en"
+
+# Crypto news RSS feeds (GRATIS)
 NEWS_RSS_FEEDS = [
     "https://cointelegraph.com/rss",
     "https://www.coindesk.com/arc/outboundfeeds/rss/",
@@ -38,13 +60,15 @@ NEWS_RSS_FEEDS = [
     "https://thedefiant.io/feed",
 ]
 
-TWITTER_API_V2 = "https://api.twitter.com/2"
+# Reddit OAuth endpoint
+REDDIT_AUTH_URL = "https://www.reddit.com/api/v1/access_token"
+REDDIT_API_URL = "https://oauth.reddit.com"
 
 
 @dataclass
 class SentimentData:
     """Sentiment analysis result for a piece of content."""
-    source: str  # "twitter", "news", "reddit"
+    source: str  # "reddit", "google_news", "news_rss"
     text: str
     sentiment_score: float  # -1.0 to 1.0
     subjectivity: float  # 0.0 to 1.0
@@ -52,6 +76,7 @@ class SentimentData:
     keywords: list[str] = field(default_factory=list)
     timestamp: datetime = field(default_factory=datetime.utcnow)
     url: str = ""
+    upvotes: int = 0  # Reddit score
 
 
 @dataclass
@@ -70,7 +95,8 @@ class SentimentSignal:
 class SentimentAI:
     """
     AI-powered sentiment engine.
-    Scans X + news, runs NLP, generates directional signals.
+    Scans Reddit + Google News RSS, runs NLP, generates directional signals.
+    ALL DATA SOURCES ARE FREE.
     """
 
     def __init__(self):
@@ -78,7 +104,8 @@ class SentimentAI:
         self.sentiment_history: dict[str, list[SentimentData]] = {}  # market_id -> history
         self.market_keywords: dict[str, list[str]] = {}  # market_id -> keywords
         self._running: bool = False
-        self._transformer_model = None
+        self._reddit_token: str = ""
+        self._reddit_token_expires: datetime = datetime.min
 
     async def start(self):
         """Initialize sentiment engine."""
@@ -86,8 +113,10 @@ class SentimentAI:
             timeout=30.0,
             limits=httpx.Limits(max_connections=20),
         )
+        # Authenticate with Reddit if credentials available
+        await self._reddit_authenticate()
         self._running = True
-        logger.info("sentiment_ai_started")
+        logger.info("sentiment_ai_started", sources=["reddit", "google_news_rss", "crypto_news_rss"])
 
     async def stop(self):
         """Shutdown sentiment engine."""
@@ -95,6 +124,40 @@ class SentimentAI:
         if self.http_client:
             await self.http_client.aclose()
         logger.info("sentiment_ai_stopped")
+
+    # =========================================================================
+    # REDDIT AUTHENTICATION (GRATIS)
+    # =========================================================================
+
+    async def _reddit_authenticate(self):
+        """Get Reddit OAuth token (free tier - 100 req/min)."""
+        if not settings.reddit.client_id or not settings.reddit.client_secret:
+            logger.info("reddit_no_credentials", msg="Reddit scanning disabled, using news RSS only")
+            return
+
+        try:
+            auth = (settings.reddit.client_id, settings.reddit.client_secret)
+            resp = await self.http_client.post(
+                REDDIT_AUTH_URL,
+                auth=auth,
+                data={"grant_type": "client_credentials"},
+                headers={"User-Agent": settings.reddit.user_agent},
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                self._reddit_token = data.get("access_token", "")
+                expires_in = data.get("expires_in", 3600)
+                self._reddit_token_expires = datetime.utcnow() + timedelta(seconds=expires_in - 60)
+                logger.info("reddit_authenticated", expires_in=expires_in)
+            else:
+                logger.warning("reddit_auth_failed", status=resp.status_code)
+        except Exception as e:
+            logger.warning("reddit_auth_error", error=str(e))
+
+    async def _ensure_reddit_token(self):
+        """Refresh Reddit token if expired."""
+        if datetime.utcnow() >= self._reddit_token_expires:
+            await self._reddit_authenticate()
 
     # =========================================================================
     # KEYWORD EXTRACTION
@@ -105,12 +168,10 @@ class SentimentAI:
         Extract searchable keywords from a market question.
         E.g., "Will Bitcoin reach $100k by June?" → ["bitcoin", "$100k", "btc", "crypto"]
         """
-        # Remove common question words
         stop_words = {"will", "the", "be", "is", "are", "was", "were", "has", "have",
                       "do", "does", "did", "a", "an", "by", "in", "on", "at", "to",
                       "for", "of", "with", "before", "after", "this", "that"}
 
-        # Clean and tokenize
         text = question.lower().strip("?!.")
         words = re.findall(r'[\w$#@]+', text)
         keywords = [w for w in words if w not in stop_words and len(w) > 2]
@@ -118,90 +179,229 @@ class SentimentAI:
         # Add entity variants
         expanded = list(keywords)
         keyword_map = {
-            "bitcoin": ["btc", "bitcoin", "₿"],
+            "bitcoin": ["btc", "bitcoin"],
             "ethereum": ["eth", "ethereum"],
             "trump": ["trump", "donald", "potus"],
             "election": ["election", "vote", "polling"],
             "fed": ["fed", "federal reserve", "interest rate"],
             "ai": ["artificial intelligence", "openai", "chatgpt"],
+            "solana": ["sol", "solana"],
+            "xrp": ["xrp", "ripple"],
         }
         for kw in keywords:
             if kw in keyword_map:
                 expanded.extend(keyword_map[kw])
 
-        return list(set(expanded))[:15]  # Max 15 keywords
+        return list(set(expanded))[:15]
 
     # =========================================================================
-    # TWITTER/X SCANNING
+    # REDDIT SCANNING (GRATIS - 100 req/menit)
     # =========================================================================
 
-    async def scan_twitter(self, keywords: list[str], max_results: int = 100) -> list[SentimentData]:
+    async def scan_reddit(self, keywords: list[str], max_posts: int = 50) -> list[SentimentData]:
         """
-        Search Twitter/X for recent posts matching keywords.
-        Uses Twitter API v2 with bearer token.
+        Search Reddit for posts matching keywords.
+        Uses Reddit API free tier (100 requests/minute).
+        Scans: r/cryptocurrency, r/polymarket, r/bitcoin, etc.
         """
-        if not settings.twitter.bearer_token:
+        if not self._reddit_token:
             return []
 
+        await self._ensure_reddit_token()
         sentiments = []
-        query = " OR ".join(keywords[:5])  # Twitter limits query length
+        query = " OR ".join(keywords[:5])
 
         try:
+            # Search across crypto subreddits
+            headers = {
+                "Authorization": f"Bearer {self._reddit_token}",
+                "User-Agent": settings.reddit.user_agent,
+            }
+
+            # Search posts
             resp = await self.http_client.get(
-                f"{TWITTER_API_V2}/tweets/search/recent",
-                headers={"Authorization": f"Bearer {settings.twitter.bearer_token}"},
+                f"{REDDIT_API_URL}/search",
+                headers=headers,
                 params={
-                    "query": f"{query} -is:retweet lang:en",
-                    "max_results": min(max_results, 100),
-                    "tweet.fields": "created_at,public_metrics,text",
+                    "q": query,
+                    "sort": "hot",
+                    "t": "day",  # Last 24 hours
+                    "limit": max_posts,
+                    "type": "link",
                 }
             )
 
             if resp.status_code != 200:
-                logger.warning("twitter_api_error", status=resp.status_code)
+                logger.warning("reddit_search_error", status=resp.status_code)
                 return []
 
             data = resp.json()
-            tweets = data.get("data", [])
+            posts = data.get("data", {}).get("children", [])
 
-            for tweet in tweets:
-                text = tweet.get("text", "")
-                score = self._analyze_sentiment(text)
+            for post in posts:
+                post_data = post.get("data", {})
+                title = post_data.get("title", "")
+                selftext = post_data.get("selftext", "")[:300]
+                text = f"{title}. {selftext}".strip()
+                score = post_data.get("score", 0)
+                num_comments = post_data.get("num_comments", 0)
+
+                if not text:
+                    continue
+
+                # Check relevance
                 relevance = self._calculate_relevance(text, keywords)
+                if relevance < 0.2:
+                    continue
 
-                metrics = tweet.get("public_metrics", {})
-                engagement = (
-                    metrics.get("like_count", 0) +
-                    metrics.get("retweet_count", 0) * 2 +
-                    metrics.get("reply_count", 0)
-                )
+                # Analyze sentiment
+                sentiment_score = self._analyze_sentiment(text)
 
-                # Weight by engagement
-                weighted_score = score * (1 + min(engagement / 1000, 2.0))
+                # Weight by engagement (upvotes + comments)
+                engagement_weight = 1 + min((score + num_comments) / 500, 3.0)
+                weighted_score = sentiment_score * engagement_weight
 
                 sentiments.append(SentimentData(
-                    source="twitter",
-                    text=text[:280],
+                    source="reddit",
+                    text=text[:400],
                     sentiment_score=weighted_score,
                     subjectivity=TextBlob(text).sentiment.subjectivity,
                     relevance_score=relevance,
                     keywords=keywords,
-                    timestamp=datetime.utcnow(),
+                    timestamp=datetime.utcfromtimestamp(post_data.get("created_utc", 0)),
+                    url=f"https://reddit.com{post_data.get('permalink', '')}",
+                    upvotes=score,
                 ))
 
+            # Also scan comments from crypto subreddits
+            for subreddit in REDDIT_SUBREDDITS[:3]:  # Top 3 subreddits
+                await asyncio.sleep(0.1)  # Rate limit
+                comments = await self._scan_subreddit_comments(subreddit, keywords, headers)
+                sentiments.extend(comments)
+
         except httpx.HTTPError as e:
-            logger.error("twitter_scan_error", error=str(e))
+            logger.error("reddit_scan_error", error=str(e))
+
+        logger.info("reddit_scan_complete", posts=len(sentiments), query=query[:30])
+        return sentiments
+
+    async def _scan_subreddit_comments(
+        self, subreddit: str, keywords: list[str], headers: dict
+    ) -> list[SentimentData]:
+        """Scan hot posts' comments in a subreddit for sentiment."""
+        sentiments = []
+        try:
+            resp = await self.http_client.get(
+                f"{REDDIT_API_URL}/r/{subreddit}/hot",
+                headers=headers,
+                params={"limit": 10}
+            )
+            if resp.status_code != 200:
+                return []
+
+            data = resp.json()
+            posts = data.get("data", {}).get("children", [])
+
+            for post in posts:
+                post_data = post.get("data", {})
+                title = post_data.get("title", "")
+
+                # Only check posts relevant to keywords
+                if not any(kw.lower() in title.lower() for kw in keywords[:3]):
+                    continue
+
+                text = f"{title}. {post_data.get('selftext', '')[:200]}"
+                score = self._analyze_sentiment(text)
+                relevance = self._calculate_relevance(text, keywords)
+
+                if relevance >= 0.3:
+                    sentiments.append(SentimentData(
+                        source="reddit",
+                        text=text[:300],
+                        sentiment_score=score,
+                        subjectivity=0.5,
+                        relevance_score=relevance,
+                        keywords=keywords,
+                        upvotes=post_data.get("score", 0),
+                    ))
+
+        except Exception:
+            pass
 
         return sentiments
 
     # =========================================================================
-    # NEWS SCANNING
+    # GOOGLE NEWS RSS (GRATIS - tanpa API key, unlimited)
     # =========================================================================
 
-    async def scan_news(self, keywords: list[str]) -> list[SentimentData]:
+    async def scan_google_news(self, keywords: list[str]) -> list[SentimentData]:
         """
-        Scan news RSS feeds for relevant articles.
-        Analyzes headlines and summaries for sentiment.
+        Scrape Google News RSS for relevant articles.
+        COMPLETELY FREE - no API key needed.
+        """
+        sentiments = []
+        query = "+".join(keywords[:5])
+        url = GOOGLE_NEWS_RSS.format(query=quote_plus(" ".join(keywords[:5])))
+
+        try:
+            resp = await self.http_client.get(url, timeout=15.0)
+            if resp.status_code != 200:
+                return []
+
+            feed = feedparser.parse(resp.text)
+
+            for entry in feed.entries[:25]:  # Latest 25 articles
+                title = entry.get("title", "")
+                # Google News RSS includes source in title: "Title - Source"
+                source_name = ""
+                if " - " in title:
+                    parts = title.rsplit(" - ", 1)
+                    title = parts[0]
+                    source_name = parts[1] if len(parts) > 1 else ""
+
+                summary = entry.get("summary", "")
+                text = f"{title}. {summary}"
+
+                # Check relevance
+                relevance = self._calculate_relevance(text, keywords)
+                if relevance < 0.25:
+                    continue
+
+                score = self._analyze_sentiment(text)
+
+                # Parse date
+                pub_date = entry.get("published_parsed")
+                timestamp = datetime(*pub_date[:6]) if pub_date else datetime.utcnow()
+
+                # Only recent (last 24h)
+                if datetime.utcnow() - timestamp > timedelta(hours=24):
+                    continue
+
+                sentiments.append(SentimentData(
+                    source="google_news",
+                    text=text[:500],
+                    sentiment_score=score,
+                    subjectivity=TextBlob(text).sentiment.subjectivity,
+                    relevance_score=relevance,
+                    keywords=keywords,
+                    timestamp=timestamp,
+                    url=entry.get("link", ""),
+                ))
+
+        except Exception as e:
+            logger.warning("google_news_scan_error", error=str(e))
+
+        logger.info("google_news_scan_complete", articles=len(sentiments))
+        return sentiments
+
+    # =========================================================================
+    # CRYPTO NEWS RSS (GRATIS - tanpa API key)
+    # =========================================================================
+
+    async def scan_crypto_news(self, keywords: list[str]) -> list[SentimentData]:
+        """
+        Scan crypto-specific news RSS feeds.
+        CoinTelegraph, CoinDesk, Decrypt, etc. — all FREE.
         """
         sentiments = []
 
@@ -213,12 +413,11 @@ class SentimentAI:
 
                 feed = feedparser.parse(resp.text)
 
-                for entry in feed.entries[:20]:  # Latest 20 per feed
+                for entry in feed.entries[:20]:
                     title = entry.get("title", "")
                     summary = entry.get("summary", "")
                     text = f"{title}. {summary}"
 
-                    # Check relevance
                     relevance = self._calculate_relevance(text, keywords)
                     if relevance < 0.3:
                         continue
@@ -227,12 +426,12 @@ class SentimentAI:
                     pub_date = entry.get("published_parsed")
                     timestamp = datetime(*pub_date[:6]) if pub_date else datetime.utcnow()
 
-                    # Only recent articles (last 24h)
+                    # Only recent (last 24h)
                     if datetime.utcnow() - timestamp > timedelta(hours=24):
                         continue
 
                     sentiments.append(SentimentData(
-                        source="news",
+                        source="news_rss",
                         text=text[:500],
                         sentiment_score=score,
                         subjectivity=TextBlob(text).sentiment.subjectivity,
@@ -249,7 +448,7 @@ class SentimentAI:
         return sentiments
 
     # =========================================================================
-    # SENTIMENT ANALYSIS
+    # SENTIMENT ANALYSIS (NLP)
     # =========================================================================
 
     def _analyze_sentiment(self, text: str) -> float:
@@ -266,12 +465,14 @@ class SentimentAI:
         bullish_keywords = [
             "bullish", "moon", "pump", "surge", "rally", "breakout",
             "confirmed", "approved", "passed", "won", "victory", "success",
-            "partnership", "adoption", "milestone", "record high",
+            "partnership", "adoption", "milestone", "record high", "ath",
+            "accumulate", "buy", "long", "green", "profit",
         ]
         bearish_keywords = [
             "bearish", "dump", "crash", "collapse", "failed", "rejected",
             "denied", "lost", "defeat", "scandal", "fraud", "hack",
-            "investigation", "lawsuit", "ban", "restriction",
+            "investigation", "lawsuit", "ban", "restriction", "sell",
+            "short", "red", "loss", "rug", "scam",
         ]
 
         text_lower = text.lower()
@@ -284,7 +485,7 @@ class SentimentAI:
         negation_words = ["not", "no", "never", "won't", "can't", "don't", "unlikely"]
         has_negation = any(neg in text_lower for neg in negation_words)
         if has_negation:
-            keyword_score *= -0.5  # Partially flip
+            keyword_score *= -0.5
 
         # Combine layers
         final_score = base_score * 0.4 + keyword_score * 0.6
@@ -311,10 +512,10 @@ class SentimentAI:
     ) -> Optional[SentimentSignal]:
         """
         Generate a trading signal from sentiment analysis.
-        
+
         Process:
         1. Extract keywords from market question
-        2. Scan Twitter + News
+        2. Scan Reddit + Google News + Crypto News (ALL FREE)
         3. Aggregate sentiment
         4. Compare to current price (sentiment divergence)
         5. Generate signal if divergence is significant
@@ -324,24 +525,28 @@ class SentimentAI:
         if not keywords:
             return None
 
-        # 2. Scan sources concurrently
-        twitter_task = self.scan_twitter(keywords)
-        news_task = self.scan_news(keywords)
+        # 2. Scan ALL sources concurrently (all free)
+        reddit_task = self.scan_reddit(keywords)
+        google_news_task = self.scan_google_news(keywords)
+        crypto_news_task = self.scan_crypto_news(keywords)
 
-        twitter_sentiments, news_sentiments = await asyncio.gather(
-            twitter_task, news_task, return_exceptions=True
+        reddit_sentiments, google_sentiments, crypto_sentiments = await asyncio.gather(
+            reddit_task, google_news_task, crypto_news_task,
+            return_exceptions=True
         )
 
-        if isinstance(twitter_sentiments, Exception):
-            twitter_sentiments = []
-        if isinstance(news_sentiments, Exception):
-            news_sentiments = []
+        if isinstance(reddit_sentiments, Exception):
+            reddit_sentiments = []
+        if isinstance(google_sentiments, Exception):
+            google_sentiments = []
+        if isinstance(crypto_sentiments, Exception):
+            crypto_sentiments = []
 
-        all_sentiments = list(twitter_sentiments) + list(news_sentiments)
+        all_sentiments = list(reddit_sentiments) + list(google_sentiments) + list(crypto_sentiments)
         if len(all_sentiments) < 3:
             return None
 
-        # 3. Aggregate sentiment (weighted by relevance)
+        # 3. Aggregate sentiment (weighted by relevance + engagement)
         weights = np.array([s.relevance_score for s in all_sentiments])
         scores = np.array([s.sentiment_score for s in all_sentiments])
 
@@ -363,14 +568,10 @@ class SentimentAI:
         if market_id not in self.sentiment_history:
             self.sentiment_history[market_id] = []
         self.sentiment_history[market_id].extend(all_sentiments)
-        # Keep last 100 entries
         self.sentiment_history[market_id] = self.sentiment_history[market_id][-100:]
 
         # 5. Generate signal if sentiment diverges from price
-        # Convert sentiment (-1 to 1) to implied probability (0 to 1)
         sentiment_implied_prob = (weighted_sentiment + 1) / 2  # Map [-1,1] to [0,1]
-
-        # Divergence: sentiment says higher/lower than market price
         divergence = sentiment_implied_prob - current_price
 
         # Need significant divergence
@@ -383,10 +584,12 @@ class SentimentAI:
 
         # Source breakdown
         sources = []
-        if twitter_sentiments:
-            sources.append(f"twitter({len(twitter_sentiments)})")
-        if news_sentiments:
-            sources.append(f"news({len(news_sentiments)})")
+        if reddit_sentiments:
+            sources.append(f"reddit({len(reddit_sentiments)})")
+        if google_sentiments:
+            sources.append(f"google_news({len(google_sentiments)})")
+        if crypto_sentiments:
+            sources.append(f"crypto_rss({len(crypto_sentiments)})")
 
         # Key narratives (top sentiment texts)
         sorted_sentiments = sorted(all_sentiments, key=lambda s: abs(s.sentiment_score), reverse=True)
@@ -410,6 +613,7 @@ class SentimentAI:
             sentiment=f"{weighted_sentiment:.3f}",
             divergence=f"{divergence:.3f}",
             mentions=len(all_sentiments),
+            sources=sources,
         )
 
         return signal
@@ -418,16 +622,13 @@ class SentimentAI:
     # BATCH ANALYSIS
     # =========================================================================
 
-    async def analyze_markets(
-        self,
-        markets: list[dict]
-    ) -> list[SentimentSignal]:
+    async def analyze_markets(self, markets: list[dict]) -> list[SentimentSignal]:
         """
         Run sentiment analysis on multiple markets.
         Returns list of actionable sentiment signals.
         """
         signals = []
-        semaphore = asyncio.Semaphore(3)  # Limit concurrent API calls
+        semaphore = asyncio.Semaphore(3)  # Limit concurrent scans
 
         async def _analyze(market):
             async with semaphore:
@@ -445,7 +646,7 @@ class SentimentAI:
                 await asyncio.sleep(1.0)  # Rate limit between markets
                 return signal
 
-        tasks = [_analyze(m) for m in markets[:30]]  # Analyze top 30 markets
+        tasks = [_analyze(m) for m in markets[:30]]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         for result in results:
