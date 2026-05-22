@@ -616,6 +616,93 @@ class MarketScanner:
 
             await asyncio.sleep(settings.trading.scan_interval_seconds)
 
+    # =========================================================================
+    # v3: SMART ENTRY TIMING (Buy the Dip)
+    # =========================================================================
+
+    def should_wait_for_dip(self, market_id: str, current_price: float, direction: str) -> dict:
+        """
+        v3 Smart Entry: Instead of buying immediately at signal,
+        wait for a micro-dip (1-3%) to get a better entry price.
+        
+        Returns:
+            {"wait": True/False, "target_price": float, "reason": str}
+        """
+        history = self.orderbook_history.get(market_id, [])
+
+        # Not enough data → don't wait, enter now
+        if len(history) < 5:
+            return {"wait": False, "target_price": current_price, "reason": "insufficient data"}
+
+        # Calculate recent price range
+        recent_prices = [snap.mid_yes for snap in history[-10:]]
+        price_high = max(recent_prices)
+        price_low = min(recent_prices)
+        price_range = price_high - price_low
+
+        # If price is at the HIGH of recent range → wait for dip
+        if direction == "YES":
+            position_in_range = (current_price - price_low) / price_range if price_range > 0 else 0.5
+
+            if position_in_range > 0.75:
+                # Price is near top of range → wait for pullback
+                target = current_price * 0.97  # Wait for 3% dip
+                return {
+                    "wait": True,
+                    "target_price": round(target, 3),
+                    "reason": f"Price at {position_in_range:.0%} of range. Wait for dip to {target:.3f}",
+                    "max_wait_seconds": 300,  # Wait max 5 minutes
+                }
+            elif position_in_range > 0.50:
+                # Middle of range → small dip target
+                target = current_price * 0.985  # 1.5% dip
+                return {
+                    "wait": True,
+                    "target_price": round(target, 3),
+                    "reason": f"Mid-range entry. Target {target:.3f} (-1.5%)",
+                    "max_wait_seconds": 120,  # Wait max 2 minutes
+                }
+            else:
+                # Price is at LOW of range → enter immediately (it's already dipped)
+                return {"wait": False, "target_price": current_price, "reason": "already at dip"}
+
+        else:  # direction == "NO" (want price to go down = NO is cheap)
+            position_in_range = (price_high - current_price) / price_range if price_range > 0 else 0.5
+
+            if position_in_range > 0.75:
+                target = current_price * 1.03  # Wait for YES to spike (NO gets cheaper)
+                return {
+                    "wait": True,
+                    "target_price": round(target, 3),
+                    "reason": f"Wait for NO to get cheaper",
+                    "max_wait_seconds": 300,
+                }
+            else:
+                return {"wait": False, "target_price": current_price, "reason": "good NO entry"}
+
+    async def wait_for_dip_entry(
+        self, market_id: str, token_id: str, target_price: float, max_wait: int = 300
+    ) -> Optional[float]:
+        """
+        Wait for price to hit target (dip entry).
+        Returns actual entry price if dip occurs, None if timeout.
+        """
+        start_time = datetime.utcnow()
+        check_interval = 5  # Check every 5 seconds
+
+        while (datetime.utcnow() - start_time).total_seconds() < max_wait:
+            snap = await self.snapshot_orderbook(token_id)
+            if snap and snap.mid_yes <= target_price:
+                logger.info("dip_entry_hit", token_id=token_id[:12],
+                          target=f"{target_price:.3f}", actual=f"{snap.mid_yes:.3f}")
+                return snap.mid_yes
+
+            await asyncio.sleep(check_interval)
+
+        # Timeout - dip didn't happen, enter at current price
+        logger.info("dip_timeout", token_id=token_id[:12], target=f"{target_price:.3f}")
+        return None  # Caller decides: enter at market or skip
+
 
 # Singleton instance
 market_scanner = MarketScanner()

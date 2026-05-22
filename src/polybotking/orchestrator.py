@@ -39,6 +39,7 @@ from polybotking.engines.sentiment_ai import sentiment_ai, SentimentSignal
 from polybotking.engines.volatility_timing import volatility_timer, TimingSignal
 from polybotking.engines.risk_engine import risk_engine, PositionSize
 from polybotking.engines.ai_reasoning import ai_reasoning, DualAISignal
+from polybotking.engines.pattern_recognition import pattern_recognition, PatternScore
 
 logger = get_logger("orchestrator")
 
@@ -116,6 +117,7 @@ class Orchestrator:
             volatility_timer.start(),
             risk_engine.start(),
             ai_reasoning.start(),
+            pattern_recognition.start(),
         )
 
         self._running = True
@@ -134,6 +136,7 @@ class Orchestrator:
             volatility_timer.stop(),
             risk_engine.stop(),
             ai_reasoning.stop(),
+            pattern_recognition.stop(),
         )
 
         logger.info(
@@ -187,6 +190,7 @@ class Orchestrator:
             wallet_signals_task = wallet_intelligence.run_analysis_cycle(market_ids)
             sentiment_signals_task = sentiment_ai.analyze_markets(market_data)
             timing_signals_task = volatility_timer.analyze_markets(market_data)
+            top_wallet_task = wallet_intelligence.scan_top_wallet_activity()
 
             # Prepare market data for AI reasoning
             ai_market_data = [
@@ -204,11 +208,12 @@ class Orchestrator:
             ]
             ai_signals_task = ai_reasoning.analyze_markets(ai_market_data)
 
-            wallet_signals, sentiment_signals, timing_signals, ai_signals = await asyncio.gather(
+            wallet_signals, sentiment_signals, timing_signals, ai_signals, top_wallet_signals = await asyncio.gather(
                 wallet_signals_task,
                 sentiment_signals_task,
                 timing_signals_task,
                 ai_signals_task,
+                top_wallet_task,
                 return_exceptions=True,
             )
 
@@ -225,6 +230,12 @@ class Orchestrator:
             if isinstance(ai_signals, Exception):
                 logger.error("ai_engine_error", error=str(ai_signals))
                 ai_signals = []
+            if isinstance(top_wallet_signals, Exception):
+                logger.error("top_wallet_error", error=str(top_wallet_signals))
+                top_wallet_signals = []
+
+            # Merge top wallet copy signals into wallet signals
+            wallet_signals = list(wallet_signals) + list(top_wallet_signals)
 
             # Index signals by market_id
             wallet_by_market = {s.market_id: s for s in wallet_signals}
@@ -354,6 +365,36 @@ class Orchestrator:
                 f"p={ai_signal.consensus_probability:.3f} conf={ai_signal.consensus_confidence:.2f}"
             )
 
+        # --- v3: Pattern Recognition Scoring ---
+        num_engines = sum(1 for x in [wallet_signal, sentiment_signal, timing_signal, ai_signal] if x)
+        num_engines += 1  # Market scanner always counts
+        pattern = pattern_recognition.extract_pattern(
+            direction=opportunity.direction,
+            edge=opportunity.edge,
+            confidence=opportunity.confidence,
+            num_engines_agree=num_engines,
+            has_whale=wallet_signal is not None and wallet_signal.num_wallets >= 3,
+        )
+        pattern_score = pattern_recognition.score_opportunity(pattern)
+
+        if pattern_score.recommendation == "strong_buy":
+            confidence_scores.append(0.20)
+            reasoning.append(f"Pattern: STRONG_BUY ({pattern_score.estimated_win_rate:.0%} historical WR)")
+        elif pattern_score.recommendation == "buy":
+            confidence_scores.append(0.10)
+            reasoning.append(f"Pattern: BUY ({pattern_score.estimated_win_rate:.0%} WR)")
+        elif pattern_score.recommendation == "avoid":
+            confidence_scores.append(-0.15)
+            reasoning.append(f"Pattern: AVOID ({pattern_score.estimated_win_rate:.0%} WR - known loser)")
+
+        # --- v3: Loss Recovery Mode Filter ---
+        if risk_engine.is_recovery_mode():
+            required_edge = risk_engine.get_recovery_edge_threshold()
+            if opportunity.edge < required_edge:
+                reasoning.append(f"RECOVERY MODE: Edge {opportunity.edge:.3f} < required {required_edge:.3f}")
+                return None
+            reasoning.append(f"RECOVERY MODE: Edge OK ({opportunity.edge:.3f} >= {required_edge:.3f})")
+
         # --- Determine Final Direction ---
         final_direction = max(direction_votes, key=direction_votes.get)
         direction_strength = direction_votes[final_direction] - direction_votes[
@@ -427,16 +468,36 @@ class Orchestrator:
     # =========================================================================
 
     def _apply_sizing(self, decisions: list[TradingDecision]) -> list[TradingDecision]:
-        """Apply Kelly Criterion position sizing to each decision."""
+        """Apply Kelly Criterion position sizing to each decision (v3: Smarter Kelly)."""
         sized = []
 
         for decision in decisions:
+            # v3: Count how many engines agreed
+            num_engines = 1  # Market scanner always
+            if decision.wallet_signal:
+                num_engines += 1
+            if decision.sentiment_signal:
+                num_engines += 1
+            if decision.timing_signal:
+                num_engines += 1
+
+            # v3: Get pattern score for Kelly boost
+            pattern = pattern_recognition.extract_pattern(
+                direction=decision.direction,
+                edge=decision.combined_edge,
+                confidence=decision.combined_confidence,
+                num_engines_agree=num_engines,
+            )
+            p_score = pattern_recognition.score_opportunity(pattern)
+
             position = risk_engine.calculate_position_size(
                 market_id=decision.market_id,
                 market_price=decision.market_signal.market_price if decision.market_signal else 0.5,
                 true_probability=decision.true_probability,
                 confidence=decision.combined_confidence,
                 signal_type=decision.market_signal.signal_type.value if decision.market_signal else "combined",
+                num_engines_agree=num_engines,
+                pattern_score=p_score.pattern_confidence,
             )
 
             if position:
@@ -444,7 +505,8 @@ class Orchestrator:
                 sized.append(decision)
                 decision.reasoning.append(
                     f"Size: ${position.size_usd:.2f} ({position.size_pct_bankroll:.1%}) "
-                    f"Kelly={position.kelly_adjusted:.3f} R:R={position.risk_reward_ratio:.1f}"
+                    f"Kelly={position.kelly_adjusted:.3f} R:R={position.risk_reward_ratio:.1f} "
+                    f"Engines={num_engines}"
                 )
             else:
                 decision.action = "SKIP"

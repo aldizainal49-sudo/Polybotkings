@@ -530,6 +530,100 @@ class WalletIntelligence:
         logger.info("wallet_analysis_complete", markets=len(market_ids), signals=len(signals))
         return signals
 
+    # =========================================================================
+    # v3: TOP 50 WALLET REAL-TIME COPY
+    # =========================================================================
+
+    async def get_top_wallets(self, min_winrate: float = 0.75, min_trades: int = 30) -> list[str]:
+        """Get top 50 most profitable wallet addresses."""
+        top_wallets = []
+        for addr, profile in self.wallet_profiles.items():
+            if hasattr(profile, 'win_rate') and hasattr(profile, 'total_trades'):
+                if profile.win_rate >= min_winrate and profile.total_trades >= min_trades:
+                    top_wallets.append((addr, profile.win_rate, profile.total_pnl))
+
+        # Sort by PnL then win rate
+        top_wallets.sort(key=lambda x: (x[2], x[1]), reverse=True)
+        return [addr for addr, _, _ in top_wallets[:50]]
+
+    async def scan_top_wallet_activity(self) -> list[SmartMoneySignal]:
+        """
+        v3: Scan TOP 50 wallets for recent activity.
+        If a top wallet enters a position → generate copy signal.
+        Much more targeted than scanning all 14k wallets.
+        """
+        top_addresses = await self.get_top_wallets()
+        if not top_addresses:
+            return []
+
+        signals = []
+
+        try:
+            # Fetch recent activity from top wallets
+            for addr in top_addresses[:20]:  # Check top 20 for rate limiting
+                resp = await self.http_client.get(
+                    f"{GAMMA_API}/activity",
+                    params={"address": addr, "limit": 5}  # Last 5 trades
+                )
+                if resp.status_code != 200:
+                    continue
+
+                activities = resp.json()
+                if not activities:
+                    continue
+
+                # Check if activity is recent (last 1 hour)
+                for act in activities:
+                    timestamp = act.get("timestamp", 0)
+                    if isinstance(timestamp, (int, float)):
+                        age_seconds = (datetime.utcnow() - datetime.utcfromtimestamp(timestamp)).total_seconds()
+                    else:
+                        age_seconds = 7200  # Default: too old
+
+                    if age_seconds > 3600:  # Older than 1 hour → skip
+                        continue
+
+                    market_id = act.get("market", "") or act.get("conditionId", "")
+                    side = act.get("side", "").upper()
+                    size = float(act.get("size", 0) or 0)
+
+                    if not market_id or not side or size < 10:
+                        continue
+
+                    # This is a FRESH trade from a top wallet → generate copy signal
+                    profile = self.wallet_profiles.get(addr)
+                    wr = profile.win_rate if hasattr(profile, 'win_rate') else 0.7
+
+                    direction = "YES" if side in ("BUY", "YES") else "NO"
+
+                    signal = SmartMoneySignal(
+                        market_id=market_id,
+                        direction=direction,
+                        wallet_consensus=0.9,  # Single top wallet = high confidence
+                        avg_wallet_winrate=wr,
+                        total_volume=size,
+                        num_wallets=1,
+                        confidence=min(wr * 0.9, 0.85),  # Scale by win rate
+                    )
+                    signals.append(signal)
+
+                    logger.info(
+                        "top_wallet_copy_signal",
+                        wallet=addr[:10],
+                        market=market_id[:12],
+                        direction=direction,
+                        size=f"${size:.0f}",
+                        winrate=f"{wr:.0%}",
+                    )
+
+                await asyncio.sleep(0.2)  # Rate limit
+
+        except Exception as e:
+            logger.warning("top_wallet_scan_error", error=str(e))
+
+        logger.info("top_wallet_scan_complete", top_wallets=len(top_addresses), signals=len(signals))
+        return signals
+
 
 # Singleton
 wallet_intelligence = WalletIntelligence()

@@ -164,7 +164,9 @@ class RiskEngine:
         market_price: float,
         true_probability: float,
         confidence: float = 0.7,
-        signal_type: str = "combined"
+        signal_type: str = "combined",
+        num_engines_agree: int = 3,
+        pattern_score: float = 0.5,
     ) -> Optional[PositionSize]:
         """
         Calculate optimal position size for a trade.
@@ -207,7 +209,7 @@ class RiskEngine:
             return None
 
         # Dynamic Kelly fraction
-        kelly_fraction = self._dynamic_kelly_fraction(confidence, signal_type)
+        kelly_fraction = self._dynamic_kelly_fraction(confidence, signal_type, num_engines_agree, pattern_score)
         adjusted_kelly = self.fractional_kelly(full_kelly, kelly_fraction)
 
         # Calculate USD size
@@ -241,51 +243,101 @@ class RiskEngine:
             ),
         )
 
-    def _dynamic_kelly_fraction(self, confidence: float, signal_type: str) -> float:
+    def _dynamic_kelly_fraction(self, confidence: float, signal_type: str,
+                                num_engines_agree: int = 3, pattern_score: float = 0.5) -> float:
         """
+        v3.0 SMARTER KELLY - Confidence-Weighted Compound
+        
         Dynamically adjust Kelly fraction based on:
-        1. Recent performance (win/loss streaks)
-        2. Current drawdown
-        3. Signal confidence
-        4. Historical accuracy of this signal type
+        1. Number of engines that AGREE (more = more aggressive)
+        2. Pattern recognition score (proven pattern = more aggressive)
+        3. Win/loss streaks (momentum-based sizing)
+        4. Current drawdown (protect capital)
+        5. Loss Recovery Mode (ultra-selective after losses)
+        6. Historical accuracy of signal type
         """
         base_fraction = settings.risk.kelly_fraction  # 0.25 default
 
-        # Adjust for win/loss streaks
-        if self.state.consecutive_wins >= 3:
-            # Increase slightly on hot streak (compound faster)
+        # === v3: SMARTER KELLY - Engine Consensus Scaling ===
+        # More engines agree = higher Kelly (exponential, not linear)
+        if num_engines_agree >= 5:
+            base_fraction *= 1.50  # 5/5 agree → 50% more aggressive
+        elif num_engines_agree >= 4:
+            base_fraction *= 1.25  # 4/5 agree → 25% more aggressive
+        elif num_engines_agree >= 3:
+            base_fraction *= 1.0   # 3/5 = normal
+        elif num_engines_agree == 2:
+            base_fraction *= 0.70  # Only 2 agree → 30% less
+        else:
+            base_fraction *= 0.40  # 1 or 0 → very small
+
+        # === v3: PATTERN RECOGNITION BOOST ===
+        # If pattern_score is high (proven winning pattern), boost Kelly
+        if pattern_score >= 0.85:
+            base_fraction *= 1.30  # Proven pattern → 30% boost
+        elif pattern_score >= 0.70:
+            base_fraction *= 1.15  # Good pattern → 15% boost
+        elif pattern_score < 0.40:
+            base_fraction *= 0.60  # Bad pattern (known loser) → reduce 40%
+
+        # === v3: LOSS RECOVERY MODE ===
+        if self.state.consecutive_losses >= 2:
+            # Switch to ultra-selective mode
+            recovery_factor = max(0.30, 1.0 - (self.state.consecutive_losses * 0.20))
+            base_fraction *= recovery_factor
+            # In recovery: only trade if edge is MUCH higher than minimum
+            # (handled in calculate_position_size)
+
+        # === Streak-based compound acceleration ===
+        if self.state.consecutive_wins >= 5:
+            # Hot streak → compound aggressively
+            streak_adj = min(self.state.consecutive_wins * 0.03, 0.15)
+            base_fraction += streak_adj
+        elif self.state.consecutive_wins >= 3:
             streak_adj = min(self.state.consecutive_wins * 0.02, 0.10)
             base_fraction += streak_adj
-        elif self.state.consecutive_losses >= 2:
-            # Decrease on cold streak (protect capital)
-            streak_adj = min(self.state.consecutive_losses * 0.05, 0.15)
-            base_fraction -= streak_adj
 
-        # Adjust for drawdown
+        # === Drawdown adjustment ===
         if self.state.current_drawdown > 0.15:
-            # Significant drawdown → reduce size aggressively
             dd_adj = (self.state.current_drawdown - 0.15) * 2
             base_fraction -= dd_adj
         elif self.state.current_drawdown < 0.05:
-            # Low drawdown → slightly more aggressive
             base_fraction += 0.03
 
-        # Adjust for confidence
+        # === Confidence multiplier ===
         conf_multiplier = 0.5 + confidence * 0.5  # Range: 0.5x to 1.0x
         base_fraction *= conf_multiplier
 
-        # Historical accuracy of signal type
+        # === Historical accuracy of signal type ===
         if signal_type in self.edge_calibration:
             history = self.edge_calibration[signal_type]
             if len(history) >= 10:
                 accuracy = np.mean(history[-50:])
-                if accuracy > 0.7:
-                    base_fraction *= 1.1  # Reward accurate signals
-                elif accuracy < 0.5:
-                    base_fraction *= 0.7  # Penalize poor signals
+                if accuracy > 0.75:
+                    base_fraction *= 1.15  # Highly accurate signal
+                elif accuracy > 0.65:
+                    base_fraction *= 1.05
+                elif accuracy < 0.50:
+                    base_fraction *= 0.65  # Poor signal type
 
-        # Bounds
-        return max(0.05, min(base_fraction, 0.40))
+        # Bounds (allow higher max for v3 when confidence is very high)
+        max_kelly = 0.45 if num_engines_agree >= 4 and pattern_score >= 0.75 else 0.35
+        return max(0.05, min(base_fraction, max_kelly))
+
+    def is_recovery_mode(self) -> bool:
+        """Check if bot is in loss recovery mode."""
+        if not self.state:
+            return False
+        return self.state.consecutive_losses >= 2
+
+    def get_recovery_edge_threshold(self) -> float:
+        """In recovery mode, require higher edge before trading."""
+        if not self.is_recovery_mode():
+            return settings.risk.min_edge_threshold  # Normal: 5%
+
+        # Recovery mode: require 8-12% edge (much higher)
+        extra = self.state.consecutive_losses * 0.015
+        return settings.risk.min_edge_threshold + extra  # 5% + 1.5% per loss
 
     # =========================================================================
     # DRAWDOWN PROTECTION
