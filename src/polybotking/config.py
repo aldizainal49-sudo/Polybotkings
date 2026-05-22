@@ -28,11 +28,9 @@ class DatabaseConfig(BaseSettings):
     )
 
 
-class RedditConfig(BaseSettings):
-    """Reddit API configuration (GRATIS - 100 req/menit)."""
-    client_id: str = Field(default="", alias="REDDIT_CLIENT_ID")
-    client_secret: str = Field(default="", alias="REDDIT_CLIENT_SECRET")
-    user_agent: str = Field(default="polybotking:v1.0", alias="REDDIT_USER_AGENT")
+class SentimentSourcesConfig(BaseSettings):
+    """Sentiment data sources (Google News RSS + Crypto RSS = all FREE, no API key)."""
+    pass  # Google News RSS dan Crypto News RSS tidak butuh API key
 
 
 class NewsConfig(BaseSettings):
@@ -90,7 +88,7 @@ class Settings:
     def __init__(self):
         self.polymarket = PolymarketConfig()
         self.database = DatabaseConfig()
-        self.reddit = RedditConfig()
+        self.sentiment_sources = SentimentSourcesConfig()
         self.news = NewsConfig()
         self.ai = AIConfig()
         self.risk = RiskConfig()

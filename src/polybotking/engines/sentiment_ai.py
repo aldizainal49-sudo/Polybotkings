@@ -32,21 +32,8 @@ from polybotking.models import Signal, SignalType, async_session
 logger = get_logger("sentiment_ai")
 
 # ============================================================
-# FREE DATA SOURCES
+# FREE DATA SOURCES (No API key needed!)
 # ============================================================
-
-# Reddit subreddits to monitor (crypto + prediction markets)
-REDDIT_SUBREDDITS = [
-    "cryptocurrency",
-    "polymarket",
-    "bitcoin",
-    "ethereum",
-    "CryptoMarkets",
-    "defi",
-    "altcoin",
-    "predictit",
-    "wallstreetbets",
-]
 
 # Google News RSS (GRATIS - tanpa API key)
 GOOGLE_NEWS_RSS = "https://news.google.com/rss/search?q={query}&hl=en&gl=US&ceid=US:en"
@@ -59,10 +46,6 @@ NEWS_RSS_FEEDS = [
     "https://decrypt.co/feed",
     "https://thedefiant.io/feed",
 ]
-
-# Reddit OAuth endpoint
-REDDIT_AUTH_URL = "https://www.reddit.com/api/v1/access_token"
-REDDIT_API_URL = "https://oauth.reddit.com"
 
 
 @dataclass
@@ -104,8 +87,6 @@ class SentimentAI:
         self.sentiment_history: dict[str, list[SentimentData]] = {}  # market_id -> history
         self.market_keywords: dict[str, list[str]] = {}  # market_id -> keywords
         self._running: bool = False
-        self._reddit_token: str = ""
-        self._reddit_token_expires: datetime = datetime.min
 
     async def start(self):
         """Initialize sentiment engine."""
@@ -113,10 +94,8 @@ class SentimentAI:
             timeout=30.0,
             limits=httpx.Limits(max_connections=20),
         )
-        # Authenticate with Reddit if credentials available
-        await self._reddit_authenticate()
         self._running = True
-        logger.info("sentiment_ai_started", sources=["reddit", "google_news_rss", "crypto_news_rss"])
+        logger.info("sentiment_ai_started", sources=["google_news_rss", "crypto_news_rss"])
 
     async def stop(self):
         """Shutdown sentiment engine."""
@@ -124,40 +103,6 @@ class SentimentAI:
         if self.http_client:
             await self.http_client.aclose()
         logger.info("sentiment_ai_stopped")
-
-    # =========================================================================
-    # REDDIT AUTHENTICATION (GRATIS)
-    # =========================================================================
-
-    async def _reddit_authenticate(self):
-        """Get Reddit OAuth token (free tier - 100 req/min)."""
-        if not settings.reddit.client_id or not settings.reddit.client_secret:
-            logger.info("reddit_no_credentials", msg="Reddit scanning disabled, using news RSS only")
-            return
-
-        try:
-            auth = (settings.reddit.client_id, settings.reddit.client_secret)
-            resp = await self.http_client.post(
-                REDDIT_AUTH_URL,
-                auth=auth,
-                data={"grant_type": "client_credentials"},
-                headers={"User-Agent": settings.reddit.user_agent},
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                self._reddit_token = data.get("access_token", "")
-                expires_in = data.get("expires_in", 3600)
-                self._reddit_token_expires = datetime.utcnow() + timedelta(seconds=expires_in - 60)
-                logger.info("reddit_authenticated", expires_in=expires_in)
-            else:
-                logger.warning("reddit_auth_failed", status=resp.status_code)
-        except Exception as e:
-            logger.warning("reddit_auth_error", error=str(e))
-
-    async def _ensure_reddit_token(self):
-        """Refresh Reddit token if expired."""
-        if datetime.utcnow() >= self._reddit_token_expires:
-            await self._reddit_authenticate()
 
     # =========================================================================
     # KEYWORD EXTRACTION
@@ -193,142 +138,6 @@ class SentimentAI:
                 expanded.extend(keyword_map[kw])
 
         return list(set(expanded))[:15]
-
-    # =========================================================================
-    # REDDIT SCANNING (GRATIS - 100 req/menit)
-    # =========================================================================
-
-    async def scan_reddit(self, keywords: list[str], max_posts: int = 50) -> list[SentimentData]:
-        """
-        Search Reddit for posts matching keywords.
-        Uses Reddit API free tier (100 requests/minute).
-        Scans: r/cryptocurrency, r/polymarket, r/bitcoin, etc.
-        """
-        if not self._reddit_token:
-            return []
-
-        await self._ensure_reddit_token()
-        sentiments = []
-        query = " OR ".join(keywords[:5])
-
-        try:
-            # Search across crypto subreddits
-            headers = {
-                "Authorization": f"Bearer {self._reddit_token}",
-                "User-Agent": settings.reddit.user_agent,
-            }
-
-            # Search posts
-            resp = await self.http_client.get(
-                f"{REDDIT_API_URL}/search",
-                headers=headers,
-                params={
-                    "q": query,
-                    "sort": "hot",
-                    "t": "day",  # Last 24 hours
-                    "limit": max_posts,
-                    "type": "link",
-                }
-            )
-
-            if resp.status_code != 200:
-                logger.warning("reddit_search_error", status=resp.status_code)
-                return []
-
-            data = resp.json()
-            posts = data.get("data", {}).get("children", [])
-
-            for post in posts:
-                post_data = post.get("data", {})
-                title = post_data.get("title", "")
-                selftext = post_data.get("selftext", "")[:300]
-                text = f"{title}. {selftext}".strip()
-                score = post_data.get("score", 0)
-                num_comments = post_data.get("num_comments", 0)
-
-                if not text:
-                    continue
-
-                # Check relevance
-                relevance = self._calculate_relevance(text, keywords)
-                if relevance < 0.2:
-                    continue
-
-                # Analyze sentiment
-                sentiment_score = self._analyze_sentiment(text)
-
-                # Weight by engagement (upvotes + comments)
-                engagement_weight = 1 + min((score + num_comments) / 500, 3.0)
-                weighted_score = sentiment_score * engagement_weight
-
-                sentiments.append(SentimentData(
-                    source="reddit",
-                    text=text[:400],
-                    sentiment_score=weighted_score,
-                    subjectivity=TextBlob(text).sentiment.subjectivity,
-                    relevance_score=relevance,
-                    keywords=keywords,
-                    timestamp=datetime.utcfromtimestamp(post_data.get("created_utc", 0)),
-                    url=f"https://reddit.com{post_data.get('permalink', '')}",
-                    upvotes=score,
-                ))
-
-            # Also scan comments from crypto subreddits
-            for subreddit in REDDIT_SUBREDDITS[:3]:  # Top 3 subreddits
-                await asyncio.sleep(0.1)  # Rate limit
-                comments = await self._scan_subreddit_comments(subreddit, keywords, headers)
-                sentiments.extend(comments)
-
-        except httpx.HTTPError as e:
-            logger.error("reddit_scan_error", error=str(e))
-
-        logger.info("reddit_scan_complete", posts=len(sentiments), query=query[:30])
-        return sentiments
-
-    async def _scan_subreddit_comments(
-        self, subreddit: str, keywords: list[str], headers: dict
-    ) -> list[SentimentData]:
-        """Scan hot posts' comments in a subreddit for sentiment."""
-        sentiments = []
-        try:
-            resp = await self.http_client.get(
-                f"{REDDIT_API_URL}/r/{subreddit}/hot",
-                headers=headers,
-                params={"limit": 10}
-            )
-            if resp.status_code != 200:
-                return []
-
-            data = resp.json()
-            posts = data.get("data", {}).get("children", [])
-
-            for post in posts:
-                post_data = post.get("data", {})
-                title = post_data.get("title", "")
-
-                # Only check posts relevant to keywords
-                if not any(kw.lower() in title.lower() for kw in keywords[:3]):
-                    continue
-
-                text = f"{title}. {post_data.get('selftext', '')[:200]}"
-                score = self._analyze_sentiment(text)
-                relevance = self._calculate_relevance(text, keywords)
-
-                if relevance >= 0.3:
-                    sentiments.append(SentimentData(
-                        source="reddit",
-                        text=text[:300],
-                        sentiment_score=score,
-                        subjectivity=0.5,
-                        relevance_score=relevance,
-                        keywords=keywords,
-                        upvotes=post_data.get("score", 0),
-                    ))
-
-        except Exception:
-            pass
-
-        return sentiments
 
     # =========================================================================
     # GOOGLE NEWS RSS (GRATIS - tanpa API key, unlimited)
@@ -525,24 +334,21 @@ class SentimentAI:
         if not keywords:
             return None
 
-        # 2. Scan ALL sources concurrently (all free)
-        reddit_task = self.scan_reddit(keywords)
+        # 2. Scan ALL sources concurrently (all free, no API key needed)
         google_news_task = self.scan_google_news(keywords)
         crypto_news_task = self.scan_crypto_news(keywords)
 
-        reddit_sentiments, google_sentiments, crypto_sentiments = await asyncio.gather(
-            reddit_task, google_news_task, crypto_news_task,
+        google_sentiments, crypto_sentiments = await asyncio.gather(
+            google_news_task, crypto_news_task,
             return_exceptions=True
         )
 
-        if isinstance(reddit_sentiments, Exception):
-            reddit_sentiments = []
         if isinstance(google_sentiments, Exception):
             google_sentiments = []
         if isinstance(crypto_sentiments, Exception):
             crypto_sentiments = []
 
-        all_sentiments = list(reddit_sentiments) + list(google_sentiments) + list(crypto_sentiments)
+        all_sentiments = list(google_sentiments) + list(crypto_sentiments)
         if len(all_sentiments) < 3:
             return None
 
@@ -584,8 +390,6 @@ class SentimentAI:
 
         # Source breakdown
         sources = []
-        if reddit_sentiments:
-            sources.append(f"reddit({len(reddit_sentiments)})")
         if google_sentiments:
             sources.append(f"google_news({len(google_sentiments)})")
         if crypto_sentiments:
