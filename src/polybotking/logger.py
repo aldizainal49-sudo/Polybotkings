@@ -30,7 +30,7 @@ def setup_logging():
         wrapper_class=structlog.make_filtering_bound_logger(log_level),
         context_class=dict,
         logger_factory=structlog.PrintLoggerFactory(
-            file=open(log_file, "a") if log_file else sys.stdout
+            file=sys.stdout
         ),
         cache_logger_on_first_use=True,
     )
