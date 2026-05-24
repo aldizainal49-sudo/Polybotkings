@@ -1,5 +1,3 @@
-Ganti seluruh isi file dengan ini:
-
 """
 Structured logging with structlog + rich console output.
 """
