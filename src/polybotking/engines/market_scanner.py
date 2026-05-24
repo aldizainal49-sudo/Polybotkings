@@ -134,6 +134,7 @@ class MarketScanner:
                         "offset": offset,
                         "active": True,
                         "closed": False,
+                        "tag": "crypto",
                     }
                 )
                 resp.raise_for_status()
