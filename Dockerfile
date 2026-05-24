@@ -9,10 +9,14 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
 # System dependencies
+# - gcc/g++: for compiling Python C extensions (numpy, scikit-learn)
+# - curl: for healthcheck and debugging
+# - sqlite3: CLI tool for inspecting the trade database from inside the container
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     g++ \
     curl \
+    sqlite3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Upgrade pip first
