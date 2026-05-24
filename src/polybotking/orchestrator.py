@@ -163,14 +163,28 @@ class Orchestrator:
         """
         cycle_start = datetime.utcnow()
         decisions = []
+        # Increment cycle counter at the START so that every attempt is
+        # tracked in health checks, even when scanner returns 0 opportunities
+        # (early return) or when an exception escapes the try/except below.
+        self.state.cycles_completed += 1
+        self.state.last_cycle_time = datetime.utcnow()
+        cycle_num = self.state.cycles_completed
 
         try:
             # ===== STAGE 1: Market Discovery =====
-            logger.info("pipeline_stage_1", stage="market_discovery")
+            logger.info("pipeline_stage_1", stage="market_discovery", cycle=cycle_num)
             market_opportunities = await market_scanner.run_scan_cycle()
 
             if not market_opportunities:
-                logger.info("no_opportunities_found")
+                cycle_duration = (datetime.utcnow() - cycle_start).total_seconds()
+                logger.info(
+                    "pipeline_cycle_complete",
+                    cycle=cycle_num,
+                    decisions=0,
+                    executions=0,
+                    duration_s=f"{cycle_duration:.1f}",
+                    reason="no_opportunities_found",
+                )
                 return []
 
             # Get market IDs for subsequent analysis
@@ -274,21 +288,20 @@ class Orchestrator:
                     self.state.total_executions += 1
 
         except Exception as e:
-            logger.error("pipeline_cycle_error", error=str(e))
+            logger.error("pipeline_cycle_error", error=str(e), cycle=cycle_num)
 
-        # Update state
+        # Update state (cycle counter already incremented at start of function)
         cycle_duration = (datetime.utcnow() - cycle_start).total_seconds()
-        self.state.cycles_completed += 1
         self.state.total_decisions += len(decisions)
-        self.state.last_cycle_time = datetime.utcnow()
-        self.state.avg_cycle_duration_s = (
-            (self.state.avg_cycle_duration_s * (self.state.cycles_completed - 1) + cycle_duration)
-            / self.state.cycles_completed
-        )
+        if self.state.cycles_completed > 0:
+            self.state.avg_cycle_duration_s = (
+                (self.state.avg_cycle_duration_s * (self.state.cycles_completed - 1) + cycle_duration)
+                / self.state.cycles_completed
+            )
 
         logger.info(
             "pipeline_cycle_complete",
-            cycle=self.state.cycles_completed,
+            cycle=cycle_num,
             decisions=len(decisions),
             executions=sum(1 for d in decisions if d.action == "EXECUTE"),
             duration_s=f"{cycle_duration:.1f}",
