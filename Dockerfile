@@ -31,15 +31,22 @@ RUN python -m textblob.download_corpora || true
 # Create data/logs directories
 RUN mkdir -p /app/data /app/logs
 
-# Copy any remaining files (e.g. .env.example, configs)
+# Copy any remaining files (e.g. .env.example, configs, entrypoint)
 COPY . .
 
-# Non-root user
-RUN useradd -m botuser && chown -R botuser:botuser /app
-USER botuser
+# Install entrypoint script that auto-fixes volume permissions at runtime
+RUN cp /app/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh && \
+    chmod +x /usr/local/bin/docker-entrypoint.sh
+
+# Non-root user (UID 1000 - matches typical host user for clean volume mounts)
+RUN useradd -m -u 1000 botuser && chown -R botuser:botuser /app
+
+# NOTE: We intentionally start as root and drop to botuser inside the
+# entrypoint, so the entrypoint can chown the volume mounts first.
 
 # Health check endpoint (served by embedded dashboard inside main.py)
 EXPOSE 8080
 
 # Default: run the bot (which also starts the embedded health server)
+ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["python", "-m", "polybotking.main"]
