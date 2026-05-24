@@ -38,6 +38,7 @@ def status():
 
 
 async def _show_status():
+    from polybotking.config import settings
     from polybotking.models import init_db, async_session, Trade, TradeStatus, BotState
     from sqlalchemy import select, func
 
@@ -58,19 +59,24 @@ async def _show_status():
         )
         total_pnl = await session.scalar(select(func.sum(Trade.pnl))) or 0
 
-    # Display
+    # Display - read settings as fallback so a fresh database (no risk_state row
+    # yet) reports the correct configured INITIAL_BANKROLL / KELLY_FRACTION
+    # instead of stale hard-coded defaults.
     table = Table(title="PolyBotKing Status", show_header=True)
     table.add_column("Metric", style="cyan")
     table.add_column("Value", style="green")
 
-    table.add_row("Bankroll", f"${risk_data.get('current_bankroll', 5.0):.2f}")
+    bankroll = risk_data.get("current_bankroll", settings.risk.initial_bankroll)
+    kelly_mult = risk_data.get("kelly_multiplier", settings.risk.kelly_fraction)
+
+    table.add_row("Bankroll", f"${bankroll:.2f}")
     table.add_row("Total PnL", f"${total_pnl:.2f}")
     table.add_row("Win Rate", f"{risk_data.get('win_rate', 0):.1%}")
     table.add_row("Total Trades", str(total_trades or 0))
     table.add_row("Open Positions", str(open_trades or 0))
     table.add_row("Won Trades", str(won_trades or 0))
     table.add_row("Drawdown", f"{risk_data.get('current_drawdown', 0):.1%}")
-    table.add_row("Kelly Multiplier", f"{risk_data.get('kelly_multiplier', 0.25):.2f}")
+    table.add_row("Kelly Multiplier", f"{kelly_mult:.2f}")
     table.add_row("Circuit Breaker", "ACTIVE" if risk_data.get('is_circuit_breaker_active') else "OFF")
 
     console.print(table)

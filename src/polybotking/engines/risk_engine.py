@@ -90,6 +90,10 @@ class RiskEngine:
     async def start(self):
         """Initialize risk engine with state from database."""
         await self._load_state()
+        # Persist state immediately so external readers (CLI status, dashboard,
+        # monitoring tools) see the correct bankroll right after startup,
+        # without having to wait for the next save cycle.
+        await self._save_state()
         self._running = True
         logger.info(
             "risk_engine_started",
