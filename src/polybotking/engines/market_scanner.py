@@ -152,8 +152,35 @@ class MarketScanner:
                 # Rate limiting
                 await asyncio.sleep(0.1)
 
+            except httpx.HTTPStatusError as e:
+                # 4xx at high offset = "no more pages" - this is a normal end of
+                # pagination, not a real error. Polymarket Gamma API returns 422
+                # when offset exceeds the available result set.
+                status = e.response.status_code if e.response is not None else 0
+                if status in (400, 404, 422):
+                    logger.info(
+                        "pagination_complete",
+                        offset=offset,
+                        status=status,
+                        total_fetched=len(markets),
+                        msg="reached end of available markets",
+                    )
+                else:
+                    logger.warning(
+                        "fetch_markets_http_error",
+                        status=status,
+                        offset=offset,
+                        error=str(e),
+                    )
+                break
             except httpx.HTTPError as e:
-                logger.error("fetch_markets_error", error=str(e), offset=offset)
+                # Network error, timeout, etc - log as warning, not error,
+                # since the bot recovers gracefully (uses what it already has).
+                logger.warning(
+                    "fetch_markets_network_error",
+                    error=str(e),
+                    offset=offset,
+                )
                 break
 
         # Filter by timeframe
