@@ -119,23 +119,73 @@ class MarketScanner:
     async def fetch_all_markets(self) -> list[dict]:
         """
         Fetch all active markets from Polymarket Gamma API.
+        Loops through every category in settings.trading.market_tags_list and
+        deduplicates markets that appear under more than one tag.
         Filters: active, within timeframe window (1hr-7days).
         """
-        markets = []
+        seen_ids: set[str] = set()
+        markets: list[dict] = []
+
+        tags = settings.trading.market_tags_list
+        # Empty list means "all categories" - we send a single request without a tag filter
+        scan_tags: list[Optional[str]] = list(tags) if tags else [None]
+
+        logger.info("scanner_tags_configured", tags=tags or ["<all>"])
+
+        for tag in scan_tags:
+            tag_markets = await self._fetch_markets_for_tag(tag)
+            new_count = 0
+            for m in tag_markets:
+                mid = m.get("id") or m.get("conditionId") or ""
+                if not mid:
+                    continue
+                if mid in seen_ids:
+                    continue
+                seen_ids.add(mid)
+                markets.append(m)
+                new_count += 1
+            logger.info(
+                "tag_scan_done",
+                tag=tag or "<all>",
+                fetched=len(tag_markets),
+                new_unique=new_count,
+                running_total=len(markets),
+            )
+
+        # Filter by timeframe
+        filtered = self._filter_by_timeframe(markets)
+        logger.info(
+            "markets_fetched",
+            total=len(markets),
+            filtered=len(filtered),
+            tags=len(scan_tags),
+        )
+        return filtered
+
+    async def _fetch_markets_for_tag(self, tag: Optional[str]) -> list[dict]:
+        """
+        Fetch every page of active markets for one tag (or no tag = all).
+        Returns a flat list. Pagination stops on empty page, short page,
+        or 4xx (which Polymarket returns when offset exceeds total).
+        """
+        markets: list[dict] = []
         offset = 0
         limit = 100
 
         while True:
+            params: dict = {
+                "limit": limit,
+                "offset": offset,
+                "active": True,
+                "closed": False,
+            }
+            if tag:
+                params["tag"] = tag
+
             try:
                 resp = await self.http_client.get(
                     f"{GAMMA_BASE_URL}/markets",
-                    params={
-                        "limit": limit,
-                        "offset": offset,
-                        "active": True,
-                        "closed": False,
-                        "tag": "crypto",
-                    }
+                    params=params,
                 )
                 resp.raise_for_status()
                 batch = resp.json()
@@ -149,17 +199,39 @@ class MarketScanner:
                 if len(batch) < limit:
                     break
 
-                # Rate limiting
+                # Rate limiting between pages
                 await asyncio.sleep(0.1)
 
+            except httpx.HTTPStatusError as e:
+                # 4xx at high offset = "no more pages" - normal end of pagination.
+                status = e.response.status_code if e.response is not None else 0
+                if status in (400, 404, 422):
+                    logger.info(
+                        "pagination_complete",
+                        tag=tag or "<all>",
+                        offset=offset,
+                        status=status,
+                        total_fetched=len(markets),
+                    )
+                else:
+                    logger.warning(
+                        "fetch_markets_http_error",
+                        tag=tag or "<all>",
+                        status=status,
+                        offset=offset,
+                        error=str(e),
+                    )
+                break
             except httpx.HTTPError as e:
-                logger.error("fetch_markets_error", error=str(e), offset=offset)
+                logger.warning(
+                    "fetch_markets_network_error",
+                    tag=tag or "<all>",
+                    error=str(e),
+                    offset=offset,
+                )
                 break
 
-        # Filter by timeframe
-        filtered = self._filter_by_timeframe(markets)
-        logger.info("markets_fetched", total=len(markets), filtered=len(filtered))
-        return filtered
+        return markets
 
     def _filter_by_timeframe(self, markets: list[dict]) -> list[dict]:
         """Filter markets to those resolving within 1hr - 7 days."""

@@ -75,6 +75,38 @@ class ExecutionEngine:
         self.active_positions: dict[str, Position] = {}  # market_id -> position
         self._running: bool = False
 
+    @staticmethod
+    def _is_valid_hex_private_key(key: str) -> bool:
+        """Return True if `key` is a 32-byte hex private key (with or without 0x prefix)."""
+        if not key:
+            return False
+        cleaned = key.strip()
+        if cleaned.lower().startswith("0x"):
+            cleaned = cleaned[2:]
+        if len(cleaned) != 64:
+            return False
+        try:
+            int(cleaned, 16)
+        except ValueError:
+            return False
+        return True
+
+    @staticmethod
+    def _looks_like_placeholder(value: str) -> bool:
+        """Detect obvious placeholder values from .env.example."""
+        if not value:
+            return True
+        v = value.strip().lower()
+        if not v:
+            return True
+        # Common placeholder patterns
+        return (
+            v.startswith("your_")
+            or v.startswith("your-")
+            or v in {"changeme", "todo", "xxx", "placeholder"}
+            or v.startswith("0x000000000000000000000000000000000000000000000000000000000000000")
+        )
+
     async def start(self):
         """Initialize execution engine with CLOB client."""
         self.http_client = httpx.AsyncClient(
@@ -87,31 +119,71 @@ class ExecutionEngine:
             from py_clob_client_v2.client import ClobClient
             from py_clob_client_v2.clob_types import ApiCreds
 
-            if settings.polymarket.api_key and settings.polymarket.private_key:
+            api_key = (settings.polymarket.api_key or "").strip()
+            private_key = (settings.polymarket.private_key or "").strip()
+
+            # Validate that credentials are real, not .env.example placeholders.
+            api_key_valid = bool(api_key) and not self._looks_like_placeholder(api_key)
+            pk_valid = (
+                bool(private_key)
+                and not self._looks_like_placeholder(private_key)
+                and self._is_valid_hex_private_key(private_key)
+            )
+
+            if api_key_valid and pk_valid:
                 creds = ApiCreds(
-                    api_key=settings.polymarket.api_key,
+                    api_key=api_key,
                     api_secret=settings.polymarket.api_secret,
                     api_passphrase=settings.polymarket.api_passphrase,
                 )
-                self.clob_client = ClobClient(
-                    host=CLOB_BASE_URL,
-                    chain_id=settings.polymarket.chain_id,
-                    key=settings.polymarket.private_key,
-                    creds=creds,
-                    # V2: pUSD collateral, deposit wallet address dari profil
-                    funder=settings.polymarket.wallet_address,
-                )
-                logger.info(
-                    "clob_client_v2_initialized",
-                    collateral="pUSD",
-                    wallet_type=settings.polymarket.wallet_type,
-                    funder=settings.polymarket.wallet_address[:10] + "..." if settings.polymarket.wallet_address else "none",
-                )
+                try:
+                    self.clob_client = ClobClient(
+                        host=CLOB_BASE_URL,
+                        chain_id=settings.polymarket.chain_id,
+                        key=private_key,
+                        creds=creds,
+                        # V2: pUSD collateral, deposit wallet address dari profil
+                        funder=settings.polymarket.wallet_address,
+                    )
+                    logger.info(
+                        "clob_client_v2_initialized",
+                        collateral="pUSD",
+                        wallet_type=settings.polymarket.wallet_type,
+                        funder=(
+                            settings.polymarket.wallet_address[:10] + "..."
+                            if settings.polymarket.wallet_address
+                            else "none"
+                        ),
+                    )
+                except Exception as e:
+                    # Anything goes wrong building the client (bad key format,
+                    # network error, etc.) -> degrade to paper-trade mode rather
+                    # than crashing the bot.
+                    logger.error(
+                        "clob_client_init_failed",
+                        error=str(e),
+                        msg="Falling back to paper-trade mode",
+                    )
+                    self.clob_client = None
             else:
-                logger.warning("clob_client_no_credentials", msg="Running in paper-trade mode")
+                logger.warning(
+                    "clob_client_no_credentials",
+                    msg="Missing or placeholder credentials - running in paper-trade mode",
+                    api_key_set=api_key_valid,
+                    private_key_valid=pk_valid,
+                )
 
         except ImportError:
             logger.warning("py_clob_client_v2_not_installed", msg="Running in simulation mode")
+        except Exception as e:
+            # Any other unexpected error during CLOB init - never let it crash
+            # the bot (it has full paper-trade fallback).
+            logger.error(
+                "clob_client_setup_unexpected_error",
+                error=str(e),
+                msg="Falling back to paper-trade mode",
+            )
+            self.clob_client = None
 
         # Load active positions from DB
         await self._load_active_positions()
