@@ -466,8 +466,8 @@ class MarketScanner:
         token_ids = []
         for m in markets[:100]:  # Top 100 by volume
             tokens = m.get("clobTokenIds", [])
-            if tokens:
-                token_ids.extend(tokens[:1])  # YES token
+            if tokens and isinstance(tokens[0], str) and len(tokens[0]) > 5:
+                    token_ids.append(tokens[0])  # YES token
 
         snapshots = await self.batch_snapshot(token_ids[:50])  # Limit snapshots
 
