@@ -102,6 +102,20 @@ class TradingConfig(BaseSettings):
     stop_loss_pct: float = Field(default=0.15, alias="STOP_LOSS_PCT")
     trailing_stop_pct: float = Field(default=0.10, alias="TRAILING_STOP_PCT")
     enable_websocket: bool = Field(default=True, alias="ENABLE_WEBSOCKET")
+    # Market categories to scan on Polymarket (comma-separated tags).
+    # Default scans crypto + politics + sports + economy.
+    # Set to empty string ("") to scan ALL categories (heavier but more opportunities).
+    market_tags: str = Field(
+        default="crypto,politics,sports,economy",
+        alias="MARKET_TAGS",
+    )
+
+    @property
+    def market_tags_list(self) -> list[str]:
+        """Parse the comma-separated MARKET_TAGS env var into a clean list of tags."""
+        if not self.market_tags or not self.market_tags.strip():
+            return []
+        return [t.strip().lower() for t in self.market_tags.split(",") if t.strip()]
 
 
 class AlertsConfig(BaseSettings):
