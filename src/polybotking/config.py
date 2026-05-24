@@ -4,51 +4,80 @@ All parameters loaded from .env file or environment variables.
 """
 
 from pathlib import Path
-from pydantic_settings import BaseSettings
 from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+# Base config used by every settings group: read .env, ignore extra env vars,
+# and allow population by either field name or alias.
+_COMMON_CONFIG = SettingsConfigDict(
+    env_file=".env",
+    env_file_encoding="utf-8",
+    extra="ignore",
+    case_sensitive=False,
+    populate_by_name=True,
+)
 
 
 class PolymarketConfig(BaseSettings):
     """Polymarket CLOB V2 API configuration."""
+
+    model_config = _COMMON_CONFIG
+
     api_key: str = Field(default="", alias="POLY_API_KEY")
     api_secret: str = Field(default="", alias="POLY_API_SECRET")
     api_passphrase: str = Field(default="", alias="POLY_API_PASSPHRASE")
     private_key: str = Field(default="", alias="POLY_PRIVATE_KEY")
-    wallet_address: str = Field(default="", alias="POLY_WALLET_ADDRESS")  # Alamat profil deposit wallet
+    wallet_address: str = Field(default="", alias="POLY_WALLET_ADDRESS")
     chain_id: int = Field(default=137, alias="POLY_CHAIN_ID")
     pusd_contract: str = Field(default="", alias="POLY_PUSD_CONTRACT")
-    wallet_type: str = Field(default="deposit", alias="POLY_WALLET_TYPE")  # "deposit" or "proxy"
+    wallet_type: str = Field(default="deposit", alias="POLY_WALLET_TYPE")
 
 
 class DatabaseConfig(BaseSettings):
     """Database configuration."""
+
+    model_config = _COMMON_CONFIG
+
     url: str = Field(
         default="sqlite+aiosqlite:///data/polybotking.db",
-        alias="DATABASE_URL"
+        alias="DATABASE_URL",
     )
 
 
 class SentimentSourcesConfig(BaseSettings):
     """Sentiment data sources (Google News RSS + Crypto RSS = all FREE, no API key)."""
-    pass  # Google News RSS dan Crypto News RSS tidak butuh API key
+
+    model_config = _COMMON_CONFIG
 
 
 class NewsConfig(BaseSettings):
     """News API configuration."""
+
+    model_config = _COMMON_CONFIG
+
     api_key: str = Field(default="", alias="NEWS_API_KEY")
 
 
 class AIConfig(BaseSettings):
     """AI/LLM configuration (OpenAI + Anthropic)."""
+
+    model_config = _COMMON_CONFIG
+
     openai_api_key: str = Field(default="", alias="OPENAI_API_KEY")
     openai_model: str = Field(default="gpt-4o-mini", alias="OPENAI_MODEL")
     anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
-    anthropic_model: str = Field(default="claude-sonnet-4-20250514", alias="ANTHROPIC_MODEL")
-    ai_provider: str = Field(default="both", alias="AI_PROVIDER")  # "openai", "anthropic", "both"
+    anthropic_model: str = Field(
+        default="claude-sonnet-4-20250514", alias="ANTHROPIC_MODEL"
+    )
+    ai_provider: str = Field(default="both", alias="AI_PROVIDER")
 
 
 class RiskConfig(BaseSettings):
     """Risk and position sizing parameters."""
+
+    model_config = _COMMON_CONFIG
+
     initial_bankroll: float = Field(default=5.0, alias="INITIAL_BANKROLL")
     max_position_size_pct: float = Field(default=0.15, alias="MAX_POSITION_SIZE_PCT")
     max_drawdown_pct: float = Field(default=0.25, alias="MAX_DRAWDOWN_PCT")
@@ -59,6 +88,9 @@ class RiskConfig(BaseSettings):
 
 class TradingConfig(BaseSettings):
     """Trading parameters."""
+
+    model_config = _COMMON_CONFIG
+
     scan_interval_seconds: int = Field(default=30, alias="SCAN_INTERVAL_SECONDS")
     max_concurrent_positions: int = Field(default=10, alias="MAX_CONCURRENT_POSITIONS")
     market_timeframe_min_hours: int = Field(default=1, alias="MARKET_TIMEFRAME_MIN_HOURS")
@@ -66,16 +98,17 @@ class TradingConfig(BaseSettings):
     enable_15min_markets: bool = Field(default=True, alias="ENABLE_15MIN_MARKETS")
     target_winrate_min: float = Field(default=0.70, alias="TARGET_WINRATE_MIN")
     target_winrate_max: float = Field(default=0.85, alias="TARGET_WINRATE_MAX")
-    # Exit optimization
     take_profit_pct: float = Field(default=0.25, alias="TAKE_PROFIT_PCT")
     stop_loss_pct: float = Field(default=0.15, alias="STOP_LOSS_PCT")
     trailing_stop_pct: float = Field(default=0.10, alias="TRAILING_STOP_PCT")
-    # WebSocket
     enable_websocket: bool = Field(default=True, alias="ENABLE_WEBSOCKET")
 
 
 class AlertsConfig(BaseSettings):
     """Alerting/notification configuration."""
+
+    model_config = _COMMON_CONFIG
+
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     enable_telegram: bool = Field(default=False, alias="ENABLE_TELEGRAM_ALERTS")
     telegram_bot_token: str = Field(default="", alias="TELEGRAM_BOT_TOKEN")
@@ -85,7 +118,7 @@ class AlertsConfig(BaseSettings):
 class Settings:
     """Master settings container."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.polymarket = PolymarketConfig()
         self.database = DatabaseConfig()
         self.sentiment_sources = SentimentSourcesConfig()
@@ -94,6 +127,11 @@ class Settings:
         self.risk = RiskConfig()
         self.trading = TradingConfig()
         self.alerts = AlertsConfig()
+
+        # Ensure runtime directories exist as soon as settings are loaded
+        # (so SQLAlchemy and structlog file handlers don't crash later).
+        self.data_dir  # noqa: B018
+        self.logs_dir  # noqa: B018
 
     @property
     def data_dir(self) -> Path:

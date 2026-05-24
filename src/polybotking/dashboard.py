@@ -65,7 +65,12 @@ class HealthHandler(BaseHTTPRequestHandler):
             self.wfile.write(metrics.encode())
         except Exception as e:
             self.send_response(500)
+            self.send_header("Content-Type", "text/plain")
             self.end_headers()
+            try:
+                self.wfile.write(f"# error: {e}\n".encode())
+            except Exception:
+                pass
 
     def _get_bot_status(self) -> dict:
         """Get current bot status."""
@@ -104,7 +109,15 @@ def run_dashboard(port: int = 8080):
     """Start the health dashboard HTTP server."""
     server = HTTPServer(("0.0.0.0", port), HealthHandler)
     logger.info("dashboard_started", port=port)
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        logger.info("dashboard_interrupted")
+    finally:
+        try:
+            server.server_close()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

@@ -2,20 +2,27 @@
 Structured logging with structlog + rich console output.
 """
 
-import sys
 import logging
-import structlog
-from pathlib import Path
+import sys
 from datetime import datetime
+
+import structlog
+
 from polybotking.config import settings
 
-def setup_logging():
+
+def setup_logging() -> None:
     """Initialize structured logging for the bot."""
     log_dir = settings.logs_dir
-    log_file = log_dir / f"polybotking_{datetime.now().strftime('%Y%m%d')}.log"
+    # Reserve a daily log filename even if we don't currently write a file
+    # handler (kept for forward compatibility).
+    _ = log_dir / f"polybotking_{datetime.now().strftime('%Y%m%d')}.log"
 
-    # Set Python logging level
-    log_level = getattr(logging, settings.alerts.log_level.upper(), logging.INFO)
+    # Resolve Python logging level safely
+    level_name = (settings.alerts.log_level or "INFO").upper()
+    log_level = getattr(logging, level_name, logging.INFO)
+
+    use_console_renderer = level_name == "DEBUG"
 
     structlog.configure(
         processors=[
@@ -24,16 +31,18 @@ def setup_logging():
             structlog.processors.StackInfoRenderer(),
             structlog.dev.set_exc_info,
             structlog.processors.TimeStamper(fmt="iso"),
-            structlog.dev.ConsoleRenderer() if settings.alerts.log_level == "DEBUG"
-            else structlog.processors.JSONRenderer(),
+            (
+                structlog.dev.ConsoleRenderer()
+                if use_console_renderer
+                else structlog.processors.JSONRenderer()
+            ),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(log_level),
         context_class=dict,
-        logger_factory=structlog.PrintLoggerFactory(
-            file=sys.stdout
-        ),
+        logger_factory=structlog.PrintLoggerFactory(file=sys.stdout),
         cache_logger_on_first_use=True,
     )
+
 
 def get_logger(name: str) -> structlog.BoundLogger:
     """Get a named logger instance."""

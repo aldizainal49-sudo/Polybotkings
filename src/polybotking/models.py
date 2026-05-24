@@ -198,17 +198,22 @@ class BotState(Base):
 
 # --- Database Session ---
 
+# Ensure `data/` directory exists for the default sqlite path BEFORE creating
+# the engine. Settings.__init__ also calls this, but be defensive in case the
+# database URL was changed via env var to another sqlite file under ./data.
+_ = settings.data_dir
+
 engine = create_async_engine(settings.database.url, echo=False)
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
-async def init_db():
+async def init_db() -> None:
     """Initialize database tables."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
 
-async def get_session() -> AsyncSession:
-    """Get a database session."""
+async def get_session():
+    """Get a database session (async generator)."""
     async with async_session() as session:
         yield session
